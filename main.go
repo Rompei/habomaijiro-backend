@@ -3,32 +3,56 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"github.com/ChimeraCoder/anaconda"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/maxhawkins/google-places-api/places"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Tweet is object of tweet.
 type Tweet struct {
-	ID        string
-	Text      string
-	ImageURLs []string
-	Date      time.Time
-	Place     string
-	Menu      string
-	Price     int
-	Feel      string
+	ID        string    `json:"id"`
+	Text      string    `json:"text"`
+	ImageURLs []string  `json:"imageUrls"`
+	Date      time.Time `json:"date"`
+	Place     *Place    `json:"place"`
+	Menu      string    `json:"menu"`
+	Price     int       `json:"price"`
+	Feel      string    `json:"feel"`
+}
+
+// Place is object for place of Jiro.
+type Place struct {
+	Name    string  `json:"name"`
+	Address string  `json:"address"`
+	Lat     float64 `json:"lat"`
+	Lng     float64 `json:"lng"`
+}
+
+// NewPlace is constructor of Place.
+func NewPlace(name string) *Place {
+	return &Place{
+		Name: name,
+	}
 }
 
 func main() {
+
+	var p = flag.Bool("p", false, "Add place info in detail")
+	flag.Parse()
+
 	anaconda.SetConsumerKey(os.Getenv("CONSUMER_KEY"))
 	anaconda.SetConsumerSecret(os.Getenv("CONSUMER_SECRET"))
 
@@ -42,6 +66,10 @@ func main() {
 		panic(err)
 	}
 	tweets = append(tweets, tweetsFromAPI...)
+
+	if *p {
+		getPlace(tweets)
+	}
 
 	dump(tweets, "data/habomai.json")
 }
@@ -135,7 +163,7 @@ func analizeText(t *Tweet, text string) (err error) {
 
 	// 店名取得
 	if len(splitedText) >= 2 {
-		t.Place = splitedText[1]
+		t.Place = NewPlace(splitedText[1])
 	}
 
 	// 価格取得
@@ -162,6 +190,38 @@ func analizeText(t *Tweet, text string) (err error) {
 	re4, err := regexp.Compile(`.*YEN|https?://[\w/:%#\$&\?\(\)~\.=\+\-]+|pic\.twitter\.com.*`)
 	t.Feel = strings.TrimSpace(re4.ReplaceAllString(text, ""))
 
+	return
+}
+
+func sendSearch(service *places.Service, tweet *Tweet, wg *sync.WaitGroup) (err error) {
+	defer wg.Done()
+	if tweet.Place == nil {
+		return
+	}
+	call := service.TextSearch(tweet.Place.Name)
+	call.Language = "ja"
+	resp, err := call.Do()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if len(resp.Results) > 0 {
+		tweet.Place.Address = resp.Results[0].FormattedAddress
+		tweet.Place.Lat = resp.Results[0].Geometry.Location.Lat
+		tweet.Place.Lng = resp.Results[0].Geometry.Location.Lng
+	}
+	return
+}
+
+func getPlace(tweets []Tweet) (err error) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	var wg sync.WaitGroup
+	service := places.NewService(http.DefaultClient, os.Getenv("PLACE_API_KEY"))
+	for i := range tweets {
+		wg.Add(1)
+		go sendSearch(service, &tweets[i], &wg)
+	}
+	wg.Wait()
 	return
 }
 
